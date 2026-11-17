@@ -35,8 +35,50 @@ function readRequirements(req) {
     payTo: neo.addressToHash(req.payTo),
     feePayer: req.extra && req.extra.feePayer ? neo.addressToHash(req.extra.feePayer) : null,
     feePayerKey: req.extra && req.extra.feePayerKey ? String(req.extra.feePayerKey).toLowerCase() : null,
+    decimals: readDecimals(req.extra),
     maxTimeoutSeconds: Number(req.maxTimeoutSeconds) || 60,
   };
+}
+
+function readDecimals(extra) {
+  if (!extra || extra.decimals === undefined) return null;
+  if (!Number.isInteger(extra.decimals) || extra.decimals < 0 || extra.decimals > 32) {
+    throw Object.assign(new Error('bad extra.decimals'), { code: 'invalid_payment_requirements' });
+  }
+  return extra.decimals;
+}
+
+/**
+ * The asset must be a deployed contract that declares NEP-17, and if the requirements state `extra.decimals`
+ * it must equal what the contract's `decimals()` returns. Returns an error code, or null when the asset is fine.
+ */
+async function checkAsset(url, asset, decimals) {
+  let state;
+  try {
+    state = await neo.rpc(url, 'getcontractstate', ['0x' + asset]);
+  } catch (e) {
+    if (e instanceof neo.RpcError) return 'invalid_exact_neo_asset_not_nep17'; // unknown contract
+    throw e;
+  }
+  const standards = (state && state.manifest && state.manifest.supportedstandards) || [];
+  if (!standards.includes('NEP-17')) return 'invalid_exact_neo_asset_not_nep17';
+  if (decimals !== null) {
+    const d = await neo.rpc(url, 'invokefunction', ['0x' + asset, 'decimals', []]);
+    if (d.state !== 'HALT' || !d.stack[0] || String(d.stack[0].value) !== String(decimals)) return 'invalid_exact_neo_asset_decimals_mismatch';
+  }
+  return null;
+}
+
+// Says which field of a non-canonical transfer script differs from what the requirements ask for.
+function scriptMismatch(scriptHex, want) {
+  const got = neo.parseTransferScript(scriptHex);
+  if (!got) return 'not a canonical NEP-17 transfer script';
+  const diffs = [];
+  if (got.asset !== want.asset) diffs.push(`asset 0x${got.asset} != 0x${want.asset}`);
+  if (got.from !== want.from) diffs.push(`from 0x${got.from} != payer 0x${want.from}`);
+  if (got.to !== want.to) diffs.push(`to 0x${got.to} != payTo 0x${want.to}`);
+  if (got.amount !== want.amount) diffs.push(`amount ${got.amount} != ${want.amount}`);
+  return diffs.join('; ');
 }
 
 // ---------------------------------------------------------------- client
@@ -53,6 +95,8 @@ async function createPaymentPayload(requirements, key, { rpcUrl, resource } = {}
   if (!url) throw new Error(`no RPC endpoint known for ${requirements.network}`);
   const info = await networkInfo(url);
   if (info.magic !== r.net.magic) throw new Error(`RPC is on network ${info.magic}, requirements ask for ${r.net.magic}`);
+  const assetProblem = await checkAsset(url, r.asset, r.decimals);
+  if (assetProblem) throw Object.assign(new Error(`refusing to pay with asset 0x${r.asset}: ${assetProblem}`), { code: assetProblem });
 
   const script = neo.transferScript(r.asset, key.scriptHash, r.payTo, r.amount);
   const signers = [];
@@ -72,6 +116,7 @@ async function createPaymentPayload(requirements, key, { rpcUrl, resource } = {}
   const sim = await neo.rpc(url, 'invokescript', [neo.hexToBase64(script), signersJson(signers)]);
   if (sim.state !== 'HALT') throw new Error(`transfer simulation faulted: ${sim.exception}`);
   if (!sim.stack || !sim.stack[0] || sim.stack[0].value !== true) throw new Error('transfer simulation returned false (insufficient balance?)');
+  if (!hasTransfer(sim.notifications, r.asset, key.scriptHash, r.payTo, r.amount)) throw new Error('transfer simulation did not emit the expected Transfer event');
 
   const height = (await neo.rpc(url, 'getblockcount')) - 1;
   const t = new Transaction({
@@ -124,6 +169,8 @@ async function verifyPayment(paymentPayload, requirements, ctx = {}) {
   }
   const facilitator = ctx.feePayerKey || null;
   if (r.feePayer && (!facilitator || facilitator.scriptHash !== r.feePayer)) return fail('invalid_exact_neo_fee_payer_unknown');
+  // optional allowlist: a facilitator (especially a sponsoring one) may only accept tokens it knows
+  if (ctx.assets && !ctx.assets.map(neo.normHash).includes(r.asset)) return fail('invalid_exact_neo_asset_not_supported');
 
   // 2. decode, canonical form only
   const raw = paymentPayload.payload && paymentPayload.payload.transaction;
@@ -158,7 +205,10 @@ async function verifyPayment(paymentPayload, requirements, ctx = {}) {
   }
 
   // 4. script: exactly asset.transfer(payer, payTo, amount, null)
-  if (t.script.toBigEndian() !== neo.transferScript(r.asset, payerHash, r.payTo, r.amount)) return fail('invalid_exact_neo_payload_script', payer);
+  const script = t.script.toBigEndian();
+  if (script !== neo.transferScript(r.asset, payerHash, r.payTo, r.amount)) {
+    return { ...fail('invalid_exact_neo_payload_script', payer), detail: scriptMismatch(script, { asset: r.asset, from: payerHash, to: r.payTo, amount: r.amount }) };
+  }
 
   // 5. payer witness: standard single-sig account, valid signature for this network
   const w = t.witnesses[expectSigners - 1];
@@ -186,8 +236,14 @@ async function verifyPayment(paymentPayload, requirements, ctx = {}) {
     const seen = await neo.rpc(url, 'getrawtransaction', ['0x' + t.hash(), true]).catch(() => null);
     if (seen) return fail('invalid_exact_neo_payload_already_used', payer);
 
-    const sim = await neo.rpc(url, 'invokescript', [neo.hexToBase64(t.script.toBigEndian()), signersJson(t.signers.map((s) => ({ account: neo.normHash(s.account.toBigEndian()), scopes: s.scopes })))]);
+    const assetProblem = await checkAsset(url, r.asset, r.decimals);
+    if (assetProblem) return fail(assetProblem, payer);
+
+    const sim = await neo.rpc(url, 'invokescript', [neo.hexToBase64(script), signersJson(t.signers.map((s) => ({ account: neo.normHash(s.account.toBigEndian()), scopes: s.scopes })))]);
     if (sim.state !== 'HALT' || !sim.stack[0] || sim.stack[0].value !== true) return fail('insufficient_funds', payer);
+    // `transfer` returning true is not enough for an arbitrary token: the simulated run must emit
+    // Transfer(payer, payTo, amount) from the asset contract (catches fee-on-transfer or non-conforming tokens)
+    if (!hasTransfer(sim.notifications, r.asset, payerHash, r.payTo, r.amount)) return fail('invalid_exact_neo_transfer_not_simulated', payer);
     if (BigInt(sim.gasconsumed) > sysFee) return fail('invalid_exact_neo_payload_system_fee_too_low', payer);
 
     // network fee must cover verification; compute with the final fee-payer verification script in place
@@ -260,4 +316,4 @@ function hasTransfer(notifications, asset, from, to, amount) {
   });
 }
 
-module.exports = { createPaymentPayload, verifyPayment, settlePayment, readRequirements, hasTransfer, DEFAULT_LIMITS };
+module.exports = { createPaymentPayload, verifyPayment, settlePayment, readRequirements, checkAsset, hasTransfer, DEFAULT_LIMITS };

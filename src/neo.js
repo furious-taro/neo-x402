@@ -14,6 +14,45 @@ const ASSETS = {
   NEO: '0xef4073a0f2b305a38ec4050e4d3d28bc40ea63f5',
 };
 
+// Well-known NEP-17 tokens. Hashes, symbols and decimals were read from MainNet with getcontractstate and
+// invokefunction symbol/decimals (block 14,985,430). Only GAS and NEO exist on every network; the others are
+// MainNet deployments. Any other NEP-17 contract works too: pass its hash as `asset`.
+const TOKENS = {
+  GAS: { hash: ASSETS.GAS, symbol: 'GAS', decimals: 8, networks: '*' },
+  NEO: { hash: ASSETS.NEO, symbol: 'NEO', decimals: 0, networks: '*' },
+  bNEO: { hash: '0x48c40d4666f93408be1bef038b6722404d9a4c2a', symbol: 'bNEO', decimals: 8, networks: ['neo:860833102'] },
+  fUSDT: { hash: '0xcd48b160c1bbc9d74997b803b9a7ad50a4bef020', symbol: 'fUSDT', decimals: 6, networks: ['neo:860833102'] },
+  FLM: { hash: '0xf0151f528127558851b39c2cd8aa47da7418ab28', symbol: 'FLM', decimals: 8, networks: ['neo:860833102'] },
+};
+
+// ---- token amounts: decimal strings <-> atomic units, no floating point ----
+function checkDecimals(decimals) {
+  const d = Number(decimals);
+  if (!Number.isInteger(d) || d < 0 || d > 32) throw new Error(`bad decimals: ${decimals}`);
+  return d;
+}
+
+/** '1.5' with 6 decimals -> 1500000n. Rejects more fractional digits than the token has (no silent rounding). */
+function toAtomic(value, decimals) {
+  const d = checkDecimals(decimals);
+  const m = /^([0-9]+)(?:\.([0-9]+))?$/.exec(String(value).trim());
+  if (!m) throw new Error(`bad token amount: ${value}`);
+  const frac = (m[2] || '').replace(/0+$/, '');
+  if (frac.length > d) throw new Error(`${value} has more than ${d} decimal places`);
+  return BigInt(m[1]) * 10n ** BigInt(d) + BigInt(frac.padEnd(d, '0') || '0');
+}
+
+/** 1500000n with 6 decimals -> '1.5'. */
+function fromAtomic(atomic, decimals) {
+  const d = checkDecimals(decimals);
+  const a = BigInt(atomic);
+  if (a < 0n) throw new Error('negative amount');
+  const s = a.toString().padStart(d + 1, '0');
+  const whole = s.slice(0, s.length - d);
+  const frac = s.slice(s.length - d).replace(/0+$/, '');
+  return frac ? `${whole}.${frac}` : whole;
+}
+
 function parseNetwork(id) {
   const m = /^neo:(0|[1-9][0-9]{0,9})$/.exec(String(id));
   if (!m) throw new Error(`not a Neo CAIP-2 network id: ${id}`);
@@ -111,6 +150,38 @@ function transferScript(assetHash, fromHash, toHash, amount) {
   });
 }
 
+const leHex = (h) => Buffer.from(h, 'hex').reverse().toString('hex');
+// byte lengths of PUSHINT8..PUSHINT256 (opcodes 0x00..0x05)
+const PUSHINT_BYTES = [1, 2, 4, 8, 16, 32];
+
+/**
+ * Inverse of transferScript: { asset, from, to, amount } for a canonical transfer script, else null.
+ * Used to say *which* field of a rejected payment differs; acceptance still compares bytes.
+ */
+function parseTransferScript(scriptHex) {
+  const s = String(scriptHex).toLowerCase();
+  if (!s.startsWith('0b')) return null; // PUSHNULL (data)
+  const op = parseInt(s.slice(2, 4), 16);
+  let amount;
+  let rest;
+  if (op >= 0x10 && op <= 0x20) {
+    amount = BigInt(op - 0x10); // PUSH0..PUSH16
+    rest = s.slice(4);
+  } else if (op <= 0x05) {
+    const n = PUSHINT_BYTES[op];
+    const bytes = s.slice(4, 4 + n * 2);
+    if (bytes.length !== n * 2) return null;
+    amount = BigInt.asIntN(n * 8, BigInt('0x' + leHex(bytes)));
+    rest = s.slice(4 + n * 2);
+  } else {
+    return null;
+  }
+  const m = /^0c14([0-9a-f]{40})0c14([0-9a-f]{40})14c01f0c087472616e736665720c14([0-9a-f]{40})41627d5b52$/.exec(rest);
+  if (!m) return null;
+  const out = { asset: leHex(m[3]), from: leHex(m[2]), to: leHex(m[1]), amount };
+  return transferScript(out.asset, out.from, out.to, amount) === s ? out : null;
+}
+
 // ---- JSON-RPC ----
 class RpcError extends Error {}
 async function rpc(url, method, params = [], { timeoutMs = 15000 } = {}) {
@@ -135,7 +206,7 @@ const hexToBase64 = (h) => Buffer.from(h, 'hex').toString('base64');
 const base64ToHex = (b) => Buffer.from(b, 'base64').toString('hex');
 
 module.exports = {
-  NETWORKS, ASSETS, parseNetwork, normHash, addressToHash, hashToAddress,
+  NETWORKS, ASSETS, TOKENS, toAtomic, fromAtomic, parseNetwork, normHash, addressToHash, hashToAddress,
   keyFromWif, verifySignature, publicKeyFromVerificationScript, signatureFromInvocationScript,
-  invocationScriptFromSignature, transferScript, rpc, RpcError, hexToBase64, base64ToHex, u,
+  invocationScriptFromSignature, transferScript, parseTransferScript, rpc, RpcError, hexToBase64, base64ToHex, u,
 };

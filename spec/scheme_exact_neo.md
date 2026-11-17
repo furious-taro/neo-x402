@@ -34,7 +34,8 @@ Without `extra.feePayer` the payer is the only signer and pays its own fees; the
 
 1. **Client** requests a resource.
 2. **Resource server** answers `402` with a `PAYMENT-REQUIRED` header listing `exact` requirements on a `neo:*` network.
-3. **Client** builds the transfer script (canonical form below), simulates it with `invokescript`, sets
+3. **Client** checks `asset` (rule 8 below), builds the transfer script (canonical form below), simulates it with
+   `invokescript` and checks the simulated `Transfer` event (rule 9), sets
    `systemFee` = simulated `gasconsumed`, `validUntilBlock` = `height + ceil(maxTimeoutSeconds / blockTime)`, fills
    `networkFee` from `calculatenetworkfee`, signs `network_magic (uint32 LE) || tx_hash` and leaves the fee payer's
    invocation script empty.
@@ -56,15 +57,22 @@ Without `extra.feePayer` the payer is the only signer and pays its own fees; the
   "maxTimeoutSeconds": 60,
   "extra": {
     "feePayer": "NTWHmAuUcCBBXQTXfFtAmG5K2ER6ebpQz2",
-    "feePayerKey": "03…33-byte compressed public key…"
+    "feePayerKey": "03…33-byte compressed public key…",
+    "decimals": 8
   }
 }
 ```
 
-- `asset`: NEP-17 contract script hash, `0x` + 40 hex (big-endian, as shown by explorers). GAS is
-  `0xd2a4cff31913016155e38e474a2c06d08be276cf`, NEO is `0xef4073a0f2b305a38ec4050e4d3d28bc40ea63f5`.
-- `amount`: atomic units (GAS has 8 decimals, so `100000` = 0.001 GAS).
+- `asset`: script hash of any NEP-17 contract, `0x` + 40 hex (big-endian, as shown by explorers). The native tokens
+  have the same hash on every network: GAS is `0xd2a4cff31913016155e38e474a2c06d08be276cf` (8 decimals), NEO is
+  `0xef4073a0f2b305a38ec4050e4d3d28bc40ea63f5` (0 decimals). Deployed tokens differ per network; on MainNet, for
+  example, fUSDT is `0xcd48b160c1bbc9d74997b803b9a7ad50a4bef020` (6 decimals) and bNEO is
+  `0x48c40d4666f93408be1bef038b6722404d9a4c2a` (8 decimals).
+- `amount`: atomic units of `asset`, i.e. the human amount × 10^`decimals()` of that contract (`100000` = 0.001 GAS,
+  `250000` = 0.25 fUSDT). Conversions MUST use integer arithmetic.
 - `payTo`: a Neo N3 address.
+- `extra.decimals` (optional): the asset's decimals, for display. When present, client and facilitator MUST check it
+  equals the contract's `decimals()` and refuse the payment otherwise. The binding value is always `amount`.
 - `extra.feePayer` / `extra.feePayerKey`: present when the facilitator sponsors fees. The key lets the client size the
   network fee for the fee payer's verification script; the client MUST check that it hashes to `feePayer`.
 
@@ -93,7 +101,9 @@ SYSCALL System.Contract.Call
 ```
 
 The facilitator rebuilds this script from the requirements and the payer's script hash and compares bytes. Nothing else
-may be in the script.
+may be in the script. Because `asset`, `to` and `amount` are all in these bytes, the comparison binds the signed
+transaction to the stated asset, `payTo` and amount; a payload signed for one token can't be presented as payment in
+another.
 
 ## Facilitator Verification Rules (MUST)
 
@@ -110,9 +120,14 @@ may be in the script.
    for this version.
 6. **Validity window**: `height < validUntilBlock <= height + ceil(maxTimeoutSeconds / blockTime) + slack` (slack ≤ 2 blocks).
 7. **Not seen**: `getrawtransaction(hash)` finds nothing (no replay of a settled payment).
-8. **Simulation**: `invokescript` with the transaction's script and signers ends in `HALT` with `true` on the stack,
-   and `gasconsumed <= systemFee`.
-9. **Fees**: `networkFee >= calculatenetworkfee` (computed with the fee payer's real verification script in place).
+8. **Asset**: `getcontractstate(asset)` finds a contract whose manifest lists `NEP-17` in `supportedstandards`, and
+   if `extra.decimals` is present, `decimals()` returns that value. A facilitator MAY additionally restrict `asset` to
+   an allowlist (`invalid_exact_neo_asset_not_supported`).
+9. **Simulation**: `invokescript` with the transaction's script and signers ends in `HALT` with `true` on the stack,
+   its notifications include `Transfer(from = payer, to = payTo, amount)` emitted by `asset`, and
+   `gasconsumed <= systemFee`. The event check matters for tokens other than GAS: a non-conforming or fee-on-transfer
+   contract can return `true` while moving less than `amount`.
+10. **Fees**: `networkFee >= calculatenetworkfee` (computed with the fee payer's real verification script in place).
    The fee holder (fee payer when sponsored, else the payer) holds at least `systemFee + networkFee` GAS, plus
    `amount` when it is also the payer and the asset is GAS.
 
@@ -120,7 +135,9 @@ may be in the script.
 
 - The fee payer's witness scope is `None`, enforced by rule 3, so the facilitator signs nothing but fees.
 - The facilitator MUST cap what it sponsors. The reference implementation's defaults are `systemFee <= 0.02 GAS` and
-  `networkFee <= 0.01 GAS` (a GAS transfer costs about 0.0022 + 0.0007 GAS on MainNet).
+  `networkFee <= 0.01 GAS` (on MainNet a GAS transfer costs about 0.0022 + 0.0007 GAS; an fUSDT transfer simulated
+  at 0.0044 GAS system fee). Token contracts can cost more and can be upgraded, so a sponsoring facilitator should
+  allowlist the assets it sponsors.
 - `/settle` re-runs every check right before broadcasting and MUST NOT rely on an earlier `/verify`.
 - The facilitator rejects concurrent settlement of the same transaction hash.
 - Known residual risk: a payer who drains its balance between `/settle`'s simulation and block inclusion makes the
@@ -155,5 +172,9 @@ may be in the script.
 `payload_fee_payer_scope`, `payload_fee_payer_witness`, `payload_payer_is_facilitator`, `payload_script`,
 `payload_witness`, `payload_signature`, `payload_expired`, `payload_valid_until_too_far`, `payload_already_used`,
 `payload_system_fee_too_low`, `payload_network_fee_too_low`, `payload_fee_exceeds_maximum`, `fee_payer_unknown`,
-`fee_payer_insufficient_gas`, `payload_accepted_mismatch`, `transaction_rejected`, `transaction_failed`,
-`transfer_not_found`, `rpc_unavailable`.
+`fee_payer_insufficient_gas`, `payload_accepted_mismatch`, `asset_not_nep17`, `asset_decimals_mismatch`,
+`asset_not_supported`, `transfer_not_simulated`, `transaction_rejected`, `transaction_failed`, `transfer_not_found`,
+`rpc_unavailable`.
+
+`invalid_exact_neo_payload_script` responses MAY carry a `detail` string naming the differing field, e.g.
+`asset 0x48c4…4c2a != 0xcd48…f020`.

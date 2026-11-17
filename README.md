@@ -66,6 +66,36 @@ app.get('/weather', paywall({
 app.listen(3000);
 ```
 
+### Charge in a token other than GAS
+
+`asset` can be any NEP-17 contract. `amount` is always in the token's atomic units, so use the token's own decimals
+(`toAtomic` does the conversion with integers only and refuses extra decimal places). Fees are still GAS, paid by the
+payer or by a sponsoring facilitator.
+
+```js
+const { TOKENS, toAtomic } = require('neo-x402');
+
+accepts: [{
+  scheme: 'exact',
+  network: 'neo:860833102',
+  asset: TOKENS.fUSDT.hash,              // 0xcd48b160c1bbc9d74997b803b9a7ad50a4bef020
+  amount: String(toAtomic('0.25', TOKENS.fUSDT.decimals)), // '250000' (fUSDT has 6 decimals)
+  payTo: 'N...your address...',
+  maxTimeoutSeconds: 60,
+  extra: { decimals: 6 },                // optional; client and facilitator check it against decimals()
+}]
+```
+
+`TOKENS` lists GAS, NEO, bNEO, fUSDT and FLM with hashes and decimals read from MainNet. The others are MainNet
+deployments; any other NEP-17 hash works the same way. For a token, the client and the facilitator both:
+- require the contract to declare `NEP-17` in its manifest, and `extra.decimals` (if given) to equal `decimals()`;
+- compare the signed script byte for byte with `asset.transfer(payer, payTo, amount, null)`. On a mismatch the result's
+  `detail` names the field that differs (asset, from, to or amount);
+- require the simulated run to emit `Transfer(payer, payTo, amount)` from the asset contract. `true` from `transfer`
+  is not enough, so a token that skims a fee on transfer is refused.
+
+A facilitator can also restrict what it accepts with `localFacilitator({ assets: [ASSETS.GAS, TOKENS.fUSDT.hash] })`.
+
 To **sponsor fees**, give the facilitator a GAS-funded key and advertise it in `extra`:
 
 ```js
@@ -101,8 +131,14 @@ Resource servers then use `remoteFacilitator('http://host:8402')`.
 
 ## Tests
 
-`npm test` runs 26 tests against a fake Neo node, plus real HTTP sockets for the transport tests.
+`npm test` runs 39 tests against a fake Neo node, plus real HTTP sockets for the transport tests.
 - **Happy paths:** sponsored and direct payments, and a full client → paywall → facilitator round trip.
+- **Tokens** (`test/token.test.js`, fake node with fUSDT and bNEO metadata from MainNet): a sponsored fUSDT payment;
+  the asset hash swapped in the signed script (fUSDT → bNEO) and a fUSDT payment relabelled as GAS; payTo and amount
+  swaps with the field named in `detail`; wrong `extra.decimals`; non-NEP-17 and unknown contracts; a fee-on-transfer
+  simulation; a settled log whose Transfer comes from another contract; a direct token payment where the payer only
+  needs GAS for fees; the facilitator asset allowlist; `toAtomic`/`fromAtomic`; and an HTTP server offering GAS or
+  fUSDT paid by a client capped only in fUSDT.
 - **Rejections:** paying someone else, paying less, a different asset, appended opcodes, a `Global` payer scope, a
   widened fee-payer scope, fees over the cap or under the minimum, expired or too-long validity, attributes, a
   signature for another network, a witness from the wrong key, the facilitator as payer, and a pre-filled fee-payer
@@ -117,17 +153,24 @@ Resource servers then use `remoteFacilitator('http://host:8402')`.
 On MainNet (block 14,984,829) a sponsored GAS transfer is 245 bytes, costs 0.00215925 GAS system fee and needs
 0.00073108 GAS network fee.
 
+`npm run probe:token -- <asset> <holder> [atomic amount] [rpc]` does the same for a token, read-only. On MainNet at
+block 14,985,614 a 0.25 fUSDT transfer from an existing holder simulated to `HALT true`, emitted the expected Transfer
+event and cost 0.00437101 GAS system fee, inside the default sponsorship cap of 0.02 GAS.
+
 `npm run e2e -- keys.json [direct|sponsored|fund-facilitator]` runs real payments on TestNet. Get TestNet GAS at
-https://n3t5wish.ngd.network.
+https://n3t5wish.ngd.network (GitHub login and reCAPTCHA, so a person has to do it).
 
 ## Status and limits
 
-- Version 0.1. The payer must be a standard single-signature account. Multi-sig and contract wallets are not
+- Version 0.2. Token payments are tested against a fake node and probed read-only on MainNet; no real token payment
+  has been settled yet. The payer must be a standard single-signature account. Multi-sig and contract wallets are not
   supported yet.
 - Sponsor risk: a payer who empties its balance between the facilitator's last simulation and block inclusion makes
   the transaction FAULT, and the sponsor pays that one transaction's fee (about 0.003 GAS). Rate-limit per payer if
   that matters to you.
-- No security audit yet. Read `src/exact.js` (about 250 lines) before using it with real value.
+- A token contract can be upgraded by its owner. The checks above run on every `/verify` and `/settle`, but they
+  can't tell you whether you trust the token itself. Use the `assets` allowlist for anything that matters.
+- No security audit yet. Read `src/exact.js` (about 300 lines) before using it with real value.
 
 ## License
 

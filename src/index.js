@@ -7,6 +7,9 @@ module.exports = {
   // networks, assets, keys
   NETWORKS: neo.NETWORKS,
   ASSETS: neo.ASSETS,
+  TOKENS: neo.TOKENS,
+  toAtomic: neo.toAtomic,
+  fromAtomic: neo.fromAtomic,
   keyFromWif: neo.keyFromWif,
   // scheme
   createPaymentPayload: exact.createPaymentPayload,

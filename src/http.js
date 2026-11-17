@@ -11,10 +11,13 @@ const sameReq = (a, b) => MATCH.every((f) => String(a[f]) === String(b[f]));
 
 // ------------------------------------------------------------ facilitator
 
-/** In-process facilitator. feePayerWif is optional: without it only non-sponsored payments are accepted. */
-function localFacilitator({ feePayerWif, rpcUrls = {}, limits } = {}) {
+/**
+ * In-process facilitator. feePayerWif is optional: without it only non-sponsored payments are accepted.
+ * assets is an optional allowlist of NEP-17 contract hashes; without it any NEP-17 contract is accepted.
+ */
+function localFacilitator({ feePayerWif, rpcUrls = {}, limits, assets } = {}) {
   const feePayerKey = feePayerWif ? neo.keyFromWif(feePayerWif) : null;
-  const ctxFor = (req) => ({ feePayerKey, limits, rpcUrl: rpcUrls[req && req.network] });
+  const ctxFor = (req) => ({ feePayerKey, limits, assets, rpcUrl: rpcUrls[req && req.network] });
   return {
     feePayerKey,
     async verify(paymentPayload, paymentRequirements) {
