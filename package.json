@@ -1,0 +1,18 @@
+{
+  "name": "neo-x402",
+  "version": "0.1.0",
+  "description": "x402 pay-per-request HTTP payments settled in GAS or any NEP-17 token on Neo N3, with optional facilitator fee sponsorship.",
+  "main": "src/index.js",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test test/exact.test.js test/http.test.js",
+    "probe": "node scripts/probe-testnet.js",
+    "e2e": "node scripts/e2e-testnet.js"
+  },
+  "keywords": ["neo", "neo3", "n3", "x402", "http-402", "payments", "nep-17", "gas", "ai-agents"],
+  "repository": { "type": "git", "url": "https://github.com/furious-taro/neo-x402.git" },
+  "dependencies": {
+    "@cityofzion/neon-js": "5.10.1"
+  }
+}

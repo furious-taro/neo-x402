@@ -1,0 +1,4 @@
+node_modules/
+ref/
+*.wif
+keys*.json
