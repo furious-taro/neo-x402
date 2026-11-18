@@ -12,8 +12,10 @@ module.exports = {
   toAtomic: neo.toAtomic,
   fromAtomic: neo.fromAtomic,
   keyFromWif: neo.keyFromWif,
+  multisigAccount: neo.multisigAccount,
   // scheme
   createPaymentPayload: exact.createPaymentPayload,
+  cosignPaymentPayload: exact.cosignPaymentPayload,
   verifyPayment: exact.verifyPayment,
   settlePayment: exact.settlePayment,
   DEFAULT_LIMITS: exact.DEFAULT_LIMITS,

@@ -67,7 +67,7 @@ const TOOLS = [
   },
 ];
 
-function createMcpServer({ key, maxPerRequest, budget, rpcUrls = {}, fetchImpl = fetch, name = 'neo-x402', version = '0.3.0' }) {
+function createMcpServer({ key, maxPerRequest, budget, rpcUrls = {}, fetchImpl = fetch, name = 'neo-x402', version = '0.4.0' }) {
   if (!key) throw new Error('createMcpServer needs a payer key');
   const caps = { ...maxPerRequest };
   const totals = { ...budget };

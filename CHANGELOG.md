@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0 (2026-11-18)
+
+Multi-sig payers: a team or DAO wallet can pay per request.
+
+- `multisigAccount(m, members)`: m-of-n account from keys and/or public keys, with keys sorted the way Neo sorts them.
+  Checked against MainNet: the 7 validator keys at block 14,987,694 give the header's `nextconsensus` address
+  (the unsorted order would not).
+- `createPaymentPayload` signs with every member key it holds; `{ partial: true }` allows fewer than m, and
+  `cosignPaymentPayload(payload, account, signers)` adds the rest after checking the transaction is exactly the
+  accepted payment. Signers may be async (`{ publicKey, sign }`).
+- Facilitator: accepts a canonical m-of-n payer witness with exactly m signatures that verify in key order (the
+  `CheckMultisig` rule); `limits.maxPayerKeys` (default 16) caps n. Spec rule 5 updated.
+- `scripts/probe-multisig.js` (`npm run probe:multisig`): real network fees from a MainNet node; up to 5-of-7 stays
+  under the default 0.01 GAS sponsor cap.
+- Tests: 46 -> 56 (`test/multisig.test.js`). The fake node now sizes and checks multi-sig witnesses.
+
 ## 0.3.0 (2026-11-18)
 
 AI agents can pay through MCP.

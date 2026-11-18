@@ -1,6 +1,6 @@
 {
   "name": "neo-x402",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "x402 pay-per-request HTTP payments settled in GAS or any NEP-17 token on Neo N3, with optional facilitator fee sponsorship.",
   "main": "src/index.js",
   "license": "Apache-2.0",
@@ -8,11 +8,12 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test/exact.test.js test/http.test.js test/token.test.js test/mcp.test.js",
+    "test": "node --test test/exact.test.js test/http.test.js test/token.test.js test/mcp.test.js test/multisig.test.js",
     "probe": "node scripts/probe-testnet.js",
     "probe:token": "node scripts/probe-token.js",
     "e2e": "node scripts/e2e-testnet.js",
-    "mcp": "node bin/neo-x402-mcp.js"
+    "mcp": "node bin/neo-x402-mcp.js",
+    "probe:multisig": "node scripts/probe-multisig.js"
   },
   "keywords": [
     "neo",
@@ -24,7 +25,8 @@
     "nep-17",
     "gas",
     "ai-agents",
-    "mcp"
+    "mcp",
+    "multisig"
   ],
   "repository": {
     "type": "git",

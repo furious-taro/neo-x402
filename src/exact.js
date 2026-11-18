@@ -12,6 +12,8 @@ const DEFAULT_LIMITS = {
   maxNetworkFee: 1_000_000n, // 0.01 GAS
   // Extra blocks tolerated on validUntilBlock beyond ceil(maxTimeoutSeconds / blockTime).
   validUntilSlackBlocks: 2,
+  // Largest multi-sig payer accepted (n keys). Verification cost grows with n; the transaction size cap bounds it too.
+  maxPayerKeys: 16,
 };
 
 const fail = (invalidReason, payer) => ({ isValid: false, invalidReason, ...(payer ? { payer } : {}) });
@@ -86,10 +88,10 @@ function scriptMismatch(scriptHex, want) {
 /**
  * Build and sign a `exact` PaymentPayload for one PaymentRequirements entry.
  * @param {object} requirements x402 PaymentRequirements (scheme "exact", network "neo:<magic>")
- * @param {object} key result of neo.keyFromWif()
- * @param {object} opts { rpcUrl, resource }
+ * @param {object} key result of neo.keyFromWif(), or neo.multisigAccount(m, members) for an m-of-n payer
+ * @param {object} opts { rpcUrl, resource, partial } (partial: multi-sig only, allow fewer than m signatures)
  */
-async function createPaymentPayload(requirements, key, { rpcUrl, resource } = {}) {
+async function createPaymentPayload(requirements, key, { rpcUrl, resource, partial = false } = {}) {
   const r = readRequirements(requirements);
   const url = rpcUrl || r.net.rpc;
   if (!url) throw new Error(`no RPC endpoint known for ${requirements.network}`);
@@ -133,8 +135,20 @@ async function createPaymentPayload(requirements, key, { rpcUrl, resource } = {}
   const fee = await neo.rpc(url, 'calculatenetworkfee', [neo.hexToBase64(t.serialize(true))]);
   t.networkFee = u.BigInteger.fromNumber(fee.networkfee);
 
-  const sig = key.sign(t.getMessageForSigning(r.net.magic));
-  t.witnesses[t.witnesses.length - 1].invocationScript = u.HexString.fromHex(neo.invocationScriptFromSignature(sig));
+  const msg = t.getMessageForSigning(r.net.magic);
+  let invocation;
+  if (isMultisig(key)) {
+    // sign with the members we hold, in key order; with `partial`, fewer than the threshold is allowed and the
+    // other members add theirs with cosignPaymentPayload
+    const sigs = await multisigSignatures(key, msg, key.signers, []);
+    if (sigs.length < key.threshold && !partial) {
+      throw new Error(`multi-sig payer needs ${key.threshold} signatures, holds keys for ${sigs.length} (pass { partial: true } and cosign)`);
+    }
+    invocation = neo.invocationScriptFromSignatures(sigs.map((x) => x.sig));
+  } else {
+    invocation = neo.invocationScriptFromSignature(await key.sign(msg));
+  }
+  t.witnesses[t.witnesses.length - 1].invocationScript = u.HexString.fromHex(invocation);
 
   return {
     x402Version: 2,
@@ -142,6 +156,61 @@ async function createPaymentPayload(requirements, key, { rpcUrl, resource } = {}
     accepted: requirements,
     payload: { transaction: neo.hexToBase64(t.serialize(true)) },
   };
+}
+
+const isMultisig = (key) => key && Number.isInteger(key.threshold) && Array.isArray(key.publicKeys);
+
+// Collects signatures from `signers` (members of the multi-sig `account`) on top of `existing` ({ index, sig }),
+// stopping at the threshold. Returns them sorted by key index, the order CheckMultisig needs.
+async function multisigSignatures(account, msg, signers, existing) {
+  const have = new Map(existing.map((x) => [x.index, x.sig]));
+  for (const s of signers || []) {
+    if (have.size >= account.threshold) break;
+    const index = account.publicKeys.indexOf(String(s.publicKey).toLowerCase());
+    if (index < 0) throw new Error(`key ${s.publicKey} is not a member of multi-sig ${account.address}`);
+    if (have.has(index)) continue;
+    const sig = await s.sign(msg);
+    if (!neo.verifySignature(msg, sig, account.publicKeys[index])) throw new Error(`signer ${s.publicKey} returned a bad signature`);
+    have.set(index, sig);
+  }
+  return [...have.entries()].sort((a, b) => a[0] - b[0]).map(([index, sig]) => ({ index, sig }));
+}
+
+/**
+ * Adds one or more members' signatures to a partially signed multi-sig payment (createPaymentPayload with
+ * { partial: true }). Before signing, checks that the transaction is exactly the payment `accepted` describes, paid
+ * from `account`: a co-signer never signs a script it has not checked.
+ * @param {object} paymentPayload partially signed payload
+ * @param {object} account neo.multisigAccount(...) for the payer
+ * @param {object[]} signers keyFromWif() results (or { publicKey, sign(msgHex) }) of members adding signatures
+ */
+async function cosignPaymentPayload(paymentPayload, account, signers) {
+  if (!isMultisig(account)) throw new Error('cosignPaymentPayload needs a multisigAccount');
+  const r = readRequirements(paymentPayload.accepted);
+  const t = Transaction.deserialize(neo.base64ToHex(paymentPayload.payload.transaction));
+  const w = t.witnesses[t.witnesses.length - 1];
+  const payerSigner = t.signers[t.signers.length - 1];
+  if (neo.normHash(payerSigner.account.toBigEndian()) !== account.scriptHash || w.verificationScript.toBigEndian() !== account.verificationScript) {
+    throw new Error(`payload is not paid from multi-sig ${account.address}`);
+  }
+  if (payerSigner.scopes !== WitnessScope.CalledByEntry) throw new Error('payer signer scope must be CalledByEntry');
+  if (t.script.toBigEndian() !== neo.transferScript(r.asset, account.scriptHash, r.payTo, r.amount)) {
+    throw new Error(`transaction script is not the accepted payment: ${scriptMismatch(t.script.toBigEndian(), { asset: r.asset, from: account.scriptHash, to: r.payTo, amount: r.amount })}`);
+  }
+  if (t.attributes.length !== 0) throw new Error('unexpected transaction attributes');
+  const msg = t.getMessageForSigning(r.net.magic);
+  // existing signatures: map each to the key it verifies against (they are in key order)
+  const prior = neo.signaturesFromInvocationScript(w.invocationScript.toBigEndian()) || [];
+  const existing = [];
+  let j = 0;
+  for (const sig of prior) {
+    while (j < account.publicKeys.length && !neo.verifySignature(msg, sig, account.publicKeys[j])) j++;
+    if (j === account.publicKeys.length) throw new Error('payload carries a signature that does not verify');
+    existing.push({ index: j++, sig });
+  }
+  const sigs = await multisigSignatures(account, msg, signers, existing);
+  w.invocationScript = u.HexString.fromHex(neo.invocationScriptFromSignatures(sigs.map((x) => x.sig)));
+  return { ...paymentPayload, payload: { transaction: neo.hexToBase64(t.serialize(true)) } };
 }
 
 // ------------------------------------------------------------ facilitator
@@ -210,13 +279,25 @@ async function verifyPayment(paymentPayload, requirements, ctx = {}) {
     return { ...fail('invalid_exact_neo_payload_script', payer), detail: scriptMismatch(script, { asset: r.asset, from: payerHash, to: r.payTo, amount: r.amount }) };
   }
 
-  // 5. payer witness: standard single-sig account, valid signature for this network
+  // 5. payer witness: standard single-sig or m-of-n multi-sig account, valid signature(s) for this network
   const w = t.witnesses[expectSigners - 1];
-  const pub = neo.publicKeyFromVerificationScript(w.verificationScript.toBigEndian());
-  const sig = neo.signatureFromInvocationScript(w.invocationScript.toBigEndian());
-  if (!pub || !sig) return fail('invalid_exact_neo_payload_witness', payer);
-  if (wallet.getScriptHashFromPublicKey(pub) !== payerHash) return fail('invalid_exact_neo_payload_witness', payer);
-  if (!neo.verifySignature(t.getMessageForSigning(r.net.magic), sig, pub)) return fail('invalid_exact_neo_payload_signature', payer);
+  const vscript = w.verificationScript.toBigEndian();
+  const iscript = w.invocationScript.toBigEndian();
+  const msg = t.getMessageForSigning(r.net.magic);
+  const pub = neo.publicKeyFromVerificationScript(vscript);
+  if (pub) {
+    const sig = neo.signatureFromInvocationScript(iscript);
+    if (!sig) return fail('invalid_exact_neo_payload_witness', payer);
+    if (wallet.getScriptHashFromPublicKey(pub) !== payerHash) return fail('invalid_exact_neo_payload_witness', payer);
+    if (!neo.verifySignature(msg, sig, pub)) return fail('invalid_exact_neo_payload_signature', payer);
+  } else {
+    const ms = neo.parseMultisigVerificationScript(vscript);
+    if (!ms || ms.publicKeys.length > limits.maxPayerKeys) return fail('invalid_exact_neo_payload_witness', payer);
+    if (neo.normHash(wallet.getScriptHashFromVerificationScript(vscript)) !== payerHash) return fail('invalid_exact_neo_payload_witness', payer);
+    const sigs = neo.signaturesFromInvocationScript(iscript);
+    if (!sigs || sigs.length !== ms.threshold) return fail('invalid_exact_neo_payload_signature', payer);
+    if (!neo.verifyMultisig(msg, sigs, ms.publicKeys, ms.threshold)) return fail('invalid_exact_neo_payload_signature', payer);
+  }
 
   // 6. fee ceilings when we pay them
   const sysFee = BigInt(t.systemFee.toString());
@@ -316,4 +397,4 @@ function hasTransfer(notifications, asset, from, to, amount) {
   });
 }
 
-module.exports = { createPaymentPayload, verifyPayment, settlePayment, readRequirements, checkAsset, hasTransfer, DEFAULT_LIMITS };
+module.exports = { createPaymentPayload, cosignPaymentPayload, verifyPayment, settlePayment, readRequirements, checkAsset, hasTransfer, DEFAULT_LIMITS };

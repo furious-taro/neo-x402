@@ -135,6 +135,111 @@ function signatureFromInvocationScript(scriptHex) {
   return m ? m[1] : null;
 }
 const invocationScriptFromSignature = (sigHex) => '0c40' + sigHex;
+/** Invocation script holding one or more signatures (a multi-sig witness pushes them in public-key order). */
+const invocationScriptFromSignatures = (sigs) => sigs.map(invocationScriptFromSignature).join('');
+/** Inverse of invocationScriptFromSignatures: the signatures in push order, or null if the script is anything else. */
+function signaturesFromInvocationScript(scriptHex) {
+  const s = String(scriptHex).toLowerCase();
+  if (s.length === 0 || s.length % 132 !== 0) return null;
+  const out = [];
+  for (let i = 0; i < s.length; i += 132) {
+    const sig = signatureFromInvocationScript(s.slice(i, i + 132));
+    if (!sig) return null;
+    out.push(sig);
+  }
+  return out;
+}
+
+// ---- m-of-n multi-signature accounts ----
+// Verification script: PUSH m, n x (PUSHDATA1 0x21 <33-byte key>), PUSH n, SYSCALL System.Crypto.CheckMultisig.
+// Neo (Contract.CreateMultiSigRedeemScript) sorts the keys by curve point, X first, then Y. We sort the same way so
+// the address matches the one Neo wallets (neo-cli, NeoLine, neon-wallet) derive for the same keys and threshold.
+const MAX_MULTISIG_KEYS = 1024; // protocol limit
+
+function uncompressed(pubHex) {
+  return crypto.ECDH.convertKey(pubHex, 'prime256v1', 'hex', 'hex', 'uncompressed'); // 04 || X || Y
+}
+
+/** Public keys (33-byte compressed hex) in Neo's multi-sig order. Throws on an invalid or duplicate key. */
+function sortPublicKeys(keys) {
+  const seen = new Set();
+  const rows = keys.map((k) => {
+    const h = String(k).toLowerCase();
+    publicKeyObject(h); // validates length, prefix and that the point is on the curve
+    if (seen.has(h)) throw new Error(`duplicate public key ${h}`);
+    seen.add(h);
+    const p = uncompressed(h);
+    return { h, x: p.slice(2, 66), y: p.slice(66) };
+  });
+  rows.sort((a, b) => (a.x !== b.x ? (a.x < b.x ? -1 : 1) : a.y < b.y ? -1 : a.y > b.y ? 1 : 0));
+  return rows.map((r) => r.h);
+}
+
+/**
+ * An m-of-n multi-signature account. `members` are public keys (hex) or signers from keyFromWif(); the ones that
+ * can sign are kept so createPaymentPayload can sign with them. Address = the standard Neo multi-sig address.
+ */
+function multisigAccount(threshold, members) {
+  const n = members.length;
+  if (!Number.isInteger(threshold) || threshold < 1 || threshold > n || n > MAX_MULTISIG_KEYS) {
+    throw new Error(`bad multi-sig parameters: ${threshold} of ${n}`);
+  }
+  const pubOf = (m) => (typeof m === 'string' ? m.toLowerCase() : String(m.publicKey).toLowerCase());
+  const publicKeys = sortPublicKeys(members.map(pubOf));
+  const verificationScript = wallet.constructMultiSigVerificationScript(threshold, publicKeys);
+  const scriptHash = wallet.getScriptHashFromVerificationScript(verificationScript);
+  const signers = members.filter((m) => typeof m !== 'string' && typeof m.sign === 'function');
+  return { address: wallet.getAddressFromScriptHash(scriptHash), scriptHash, verificationScript, threshold, publicKeys, signers };
+}
+
+// PUSH1..PUSH16, PUSHINT8, PUSHINT16 (the encodings Neo's IsMultiSigContract accepts for m and n)
+function readSmallInt(s, i) {
+  const op = parseInt(s.slice(i, i + 2), 16);
+  if (op >= 0x11 && op <= 0x20) return { v: op - 0x10, next: i + 2 };
+  if (op === 0x00 && s.length >= i + 4) return { v: parseInt(s.slice(i + 2, i + 4), 16), next: i + 4 };
+  if (op === 0x01 && s.length >= i + 6) return { v: parseInt(leHex(s.slice(i + 2, i + 6)), 16), next: i + 6 };
+  return null;
+}
+
+/** { threshold, publicKeys } for a canonical multi-sig verification script, else null. */
+function parseMultisigVerificationScript(scriptHex) {
+  const s = String(scriptHex).toLowerCase();
+  if (!/^[0-9a-f]*$/.test(s) || s.length < 2) return null;
+  const m = readSmallInt(s, 0);
+  if (!m) return null;
+  let i = m.next;
+  const publicKeys = [];
+  while (s.startsWith('0c21', i)) {
+    publicKeys.push(s.slice(i + 4, i + 70));
+    i += 70;
+  }
+  const n = readSmallInt(s, i);
+  if (!n || n.v !== publicKeys.length || m.v < 1 || m.v > n.v || n.v > MAX_MULTISIG_KEYS) return null;
+  if (s.slice(n.next) !== '419ed0dc3a') return null; // SYSCALL System.Crypto.CheckMultisig
+  try {
+    if (wallet.constructMultiSigVerificationScript(m.v, publicKeys) !== s) return null; // canonical encoding only
+    publicKeys.forEach(publicKeyObject);
+  } catch {
+    return null;
+  }
+  return { threshold: m.v, publicKeys };
+}
+
+/**
+ * The check System.Crypto.CheckMultisig makes: every signature verifies against a distinct key, in key order.
+ * `sigs.length` must equal the threshold (the verification script pushes m as the signature count).
+ */
+function verifyMultisig(messageHex, sigs, publicKeys, threshold) {
+  if (!Array.isArray(sigs) || sigs.length !== threshold || threshold < 1 || threshold > publicKeys.length) return false;
+  let i = 0;
+  let j = 0;
+  while (i < sigs.length && j < publicKeys.length) {
+    if (verifySignature(messageHex, sigs[i], publicKeys[j])) i++;
+    j++;
+    if (sigs.length - i > publicKeys.length - j) return false;
+  }
+  return i === sigs.length;
+}
 
 /** The only script the `exact` scheme accepts: asset.transfer(from, to, amount, null) with CallFlags.All. */
 function transferScript(assetHash, fromHash, toHash, amount) {
@@ -209,4 +314,6 @@ module.exports = {
   NETWORKS, ASSETS, TOKENS, toAtomic, fromAtomic, parseNetwork, normHash, addressToHash, hashToAddress,
   keyFromWif, verifySignature, publicKeyFromVerificationScript, signatureFromInvocationScript,
   invocationScriptFromSignature, transferScript, parseTransferScript, rpc, RpcError, hexToBase64, base64ToHex, u,
+  invocationScriptFromSignatures, signaturesFromInvocationScript, sortPublicKeys, multisigAccount,
+  parseMultisigVerificationScript, verifyMultisig, MAX_MULTISIG_KEYS,
 };

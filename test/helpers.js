@@ -53,10 +53,16 @@ function mockChain(over = {}) {
         return { state: 'HALT', gasconsumed: '215925', stack: [{ type: 'Boolean', value: ok }], notifications };
       }
       case 'calculatenetworkfee': {
-        // like a real node: sized as if every witness carried a 64-byte signature
+        // like a real node: sized as if every witness carried its signatures (m of them for an m-of-n account),
+        // plus a verification cost per signature check (n checks for a multi-sig)
         const t = tx.Transaction.deserialize(neo.base64ToHex(params[0]));
-        t.witnesses.forEach((w) => { w.invocationScript = u.HexString.fromHex('0c40' + '00'.repeat(64)); });
-        return { networkfee: String(20 * t.size + 35_000 * t.signers.length) }; // ~mainnet: 245-byte 2-signer tx = 73,108
+        let checks = 0;
+        t.witnesses.forEach((w) => {
+          const ms = neo.parseMultisigVerificationScript(w.verificationScript.toBigEndian());
+          w.invocationScript = u.HexString.fromHex(('0c40' + '00'.repeat(64)).repeat(ms ? ms.threshold : 1));
+          checks += ms ? ms.publicKeys.length : 1;
+        });
+        return { networkfee: String(20 * t.size + 35_000 * checks) }; // ~mainnet: 245-byte 2-signer tx = 73,108
       }
       case 'getrawtransaction':
         if (state.sent.includes(params[0])) return { hash: params[0] };
@@ -71,9 +77,16 @@ function mockChain(over = {}) {
         const t = tx.Transaction.deserialize(neo.base64ToHex(params[0]));
         // the node checks every witness
         t.witnesses.forEach((w, i) => {
+          const msg = t.getMessageForSigning(894710606);
+          const ms = neo.parseMultisigVerificationScript(w.verificationScript.toBigEndian());
+          if (ms) {
+            const sigs = neo.signaturesFromInvocationScript(w.invocationScript.toBigEndian());
+            if (!neo.verifyMultisig(msg, sigs, ms.publicKeys, ms.threshold)) throw new neo.RpcError(`bad multi-sig witness ${i}`);
+            return;
+          }
           const sig = neo.signatureFromInvocationScript(w.invocationScript.toBigEndian());
           const pub = neo.publicKeyFromVerificationScript(w.verificationScript.toBigEndian());
-          if (!sig || !pub || !neo.verifySignature(t.getMessageForSigning(894710606), sig, pub)) throw new neo.RpcError(`bad witness ${i}`);
+          if (!sig || !pub || !neo.verifySignature(msg, sig, pub)) throw new neo.RpcError(`bad witness ${i}`);
         });
         const h = '0x' + t.hash();
         if (state.sent.includes(h)) throw new neo.RpcError('AlreadyExists');

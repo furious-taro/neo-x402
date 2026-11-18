@@ -119,6 +119,29 @@ console.log(await res.json(), decodePaymentResponse(res));
 `maxAmount` is required. The client only pays `exact` requirements on `neo:*` networks whose asset has a cap, and only
 up to that cap.
 
+### Pay from a multi-sig account (team or DAO wallet)
+
+A standard m-of-n Neo account can pay too. `multisigAccount` derives the same address Neo wallets show for those keys
+and that threshold (keys are sorted the way Neo sorts them; checked against MainNet's validator address).
+
+```js
+const { multisigAccount, keyFromWif, payingFetch, createPaymentPayload, cosignPaymentPayload, ASSETS } = require('neo-x402');
+
+// all signing keys in one place (for example an agent holding 2 of a 2-of-3):
+const team = multisigAccount(2, [keyFromWif(WIF_A), keyFromWif(WIF_B), PUBKEY_C]);
+const pay = payingFetch(team, { maxAmount: { [ASSETS.GAS]: 1_000_000n } });
+
+// or keys held by different people: sign what you hold, pass the payload on, the others co-sign
+const alice = multisigAccount(2, [keyFromWif(WIF_A), PUBKEY_B, PUBKEY_C]);
+const half = await createPaymentPayload(requirements, alice, { partial: true });
+const bob = multisigAccount(2, [PUBKEY_A, keyFromWif(WIF_B), PUBKEY_C]);
+const full = await cosignPaymentPayload(half, bob, bob.signers); // send `full` in PAYMENT-SIGNATURE
+```
+
+`cosignPaymentPayload` refuses to sign unless the transaction is exactly the payment in `accepted` (asset, payer,
+payTo, amount) paid from that multi-sig. A signer can also be any `{ publicKey, sign(messageHex) }` object, sync or
+async, so a hardware or remote signer fits in.
+
 ## Let an AI agent pay (MCP server)
 
 `bin/neo-x402-mcp.js` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, with no extra
@@ -159,7 +182,11 @@ Resource servers then use `remoteFacilitator('http://host:8402')`.
 
 ## Tests
 
-`npm test` runs 46 tests against a fake Neo node, plus real HTTP sockets for the transport tests.
+`npm test` runs 56 tests against a fake Neo node, plus real HTTP sockets for the transport tests.
+- **Multi-sig payers** (`test/multisig.test.js`): the address derived from MainNet's 7 validator keys equals the
+  block header's `nextconsensus`; 2-of-3 payments direct and sponsored; partial signing plus co-signing; a co-signer
+  refusing a changed recipient, amount or payer; signatures out of key order, the same member twice, one short, one
+  extra and from a non-member; the `maxPayerKeys` cap; non-canonical scripts.
 - **Happy paths:** sponsored and direct payments, and a full client → paywall → facilitator round trip.
 - **Tokens** (`test/token.test.js`, fake node with fUSDT and bNEO metadata from MainNet): a sponsored fUSDT payment;
   the asset hash swapped in the signed script (fUSDT → bNEO) and a fUSDT payment relabelled as GAS; payTo and amount
@@ -188,14 +215,18 @@ On MainNet (block 14,984,829) a sponsored GAS transfer is 245 bytes, costs 0.002
 block 14,985,614 a 0.25 fUSDT transfer from an existing holder simulated to `HALT true`, emitted the expected Transfer
 event and cost 0.00437101 GAS system fee, inside the default sponsorship cap of 0.02 GAS.
 
+`npm run probe:multisig [rpc]` asks a real node for the network fee of single-sig and m-of-n payers, alone and
+sponsored, read-only. MainNet, sponsored: single-sig 0.00073108, 2-of-3 0.0014143, 3-of-5 0.0020971, 5-of-7
+0.00279358 GAS.
+
 `npm run e2e -- keys.json [direct|sponsored|fund-facilitator]` runs real payments on TestNet. Get TestNet GAS at
 https://n3t5wish.ngd.network (GitHub login and reCAPTCHA, so a person has to do it).
 
 ## Status and limits
 
-- Version 0.3. Token payments are tested against a fake node and probed read-only on MainNet; no real token payment
-  has been settled yet. The payer must be a standard single-signature account. Multi-sig and contract wallets are not
-  supported yet.
+- Version 0.4. Token and multi-sig payments are tested against a fake node and probed read-only on MainNet; no real
+  payment has been settled on chain yet. The payer must be a standard single-sig or m-of-n multi-sig account;
+  contract wallets (a deployed `verify` method) are not supported yet.
 - Sponsor risk: a payer who empties its balance between the facilitator's last simulation and block inclusion makes
   the transaction FAULT, and the sponsor pays that one transaction's fee (about 0.003 GAS). Rate-limit per payer if
   that matters to you.

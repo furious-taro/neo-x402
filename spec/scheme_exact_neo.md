@@ -114,10 +114,16 @@ another.
    witness has an empty invocation script and an empty or matching verification script. The last signer is the payer
    with scope exactly `CalledByEntry` (no rules, contracts or groups). The payer is not the facilitator.
 4. **Script**: equals the canonical transfer script for (`asset`, payer, `payTo`, `amount`).
-5. **Payer witness**: a standard single-signature verification script (`PUSHDATA1 <33-byte key> SYSCALL CheckSig`) that
-   hashes to the payer, and an invocation script holding one 64-byte signature that verifies against
-   `network_magic || tx_hash` for the requirement's network. Contract-based and multi-signature payers are out of scope
-   for this version.
+5. **Payer witness**: the verification script hashes to the payer and is one of:
+   - a standard single-signature script (`PUSHDATA1 <33-byte key> SYSCALL System.Crypto.CheckSig`), with an
+     invocation script holding one 64-byte signature that verifies against `network_magic || tx_hash` for the
+     requirement's network; or
+   - a standard m-of-n multi-signature script (`PUSH m`, n × `PUSHDATA1 <33-byte key>`, `PUSH n`,
+     `SYSCALL System.Crypto.CheckMultisig`, canonical encoding, 1 ≤ m ≤ n), with an invocation script holding exactly
+     m 64-byte signatures, each verifying against a distinct key in key order (the rule `CheckMultisig` applies on
+     chain). A facilitator MAY cap n (reference implementation: 16).
+
+   Contract-based payers (deployed contracts with a `verify` method) are out of scope for this version.
 6. **Validity window**: `height < validUntilBlock <= height + ceil(maxTimeoutSeconds / blockTime) + slack` (slack ≤ 2 blocks).
 7. **Not seen**: `getrawtransaction(hash)` finds nothing (no replay of a settled payment).
 8. **Asset**: `getcontractstate(asset)` finds a contract whose manifest lists `NEP-17` in `supportedstandards`, and
@@ -138,6 +144,9 @@ another.
   `networkFee <= 0.01 GAS` (on MainNet a GAS transfer costs about 0.0022 + 0.0007 GAS; an fUSDT transfer simulated
   at 0.0044 GAS system fee). Token contracts can cost more and can be upgraded, so a sponsoring facilitator should
   allowlist the assets it sponsors.
+- A multi-signature payer costs more to verify. Network fees measured on MainNet with `calculatenetworkfee`
+  (block 14,987,7xx), sponsored: single-sig 0.00073108, 2-of-3 0.0014143, 3-of-5 0.0020971, 5-of-7 0.00279358 GAS,
+  all under the 0.01 GAS default cap.
 - `/settle` re-runs every check right before broadcasting and MUST NOT rely on an earlier `/verify`.
 - The facilitator rejects concurrent settlement of the same transaction hash.
 - Known residual risk: a payer who drains its balance between `/settle`'s simulation and block inclusion makes the
