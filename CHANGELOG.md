@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 (2026-11-18)
+
+AI agents can pay through MCP.
+
+- `bin/neo-x402-mcp.js`: a Model Context Protocol server over stdio (no new dependencies) with the tools
+  `neo_x402_quote`, `neo_x402_fetch` and `neo_x402_status`.
+- Two spending limits checked before signing: a per-request cap per token (`NEO_X402_MAX`) and a lifetime budget per
+  token (`NEO_X402_BUDGET`). Refusals return the 402 terms with the reason.
+- `createMcpServer` and `parseLimits` exported for embedding in other transports.
+- Tests: 39 -> 46 (`test/mcp.test.js`), including a round trip through the real stdio binary.
+
 ## 0.2.0 (2026-11-17)
 
 Any NEP-17 token, not just GAS.

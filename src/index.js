@@ -2,6 +2,7 @@
 const neo = require('./neo');
 const exact = require('./exact');
 const http = require('./http');
+const mcp = require('./mcp');
 
 module.exports = {
   // networks, assets, keys
@@ -23,4 +24,7 @@ module.exports = {
   localFacilitator: http.localFacilitator,
   remoteFacilitator: http.remoteFacilitator,
   createFacilitatorServer: http.createFacilitatorServer,
+  // agents (MCP)
+  createMcpServer: mcp.createMcpServer,
+  parseLimits: mcp.parseLimits,
 };

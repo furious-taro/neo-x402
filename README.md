@@ -119,6 +119,34 @@ console.log(await res.json(), decodePaymentResponse(res));
 `maxAmount` is required. The client only pays `exact` requirements on `neo:*` networks whose asset has a cap, and only
 up to that cap.
 
+## Let an AI agent pay (MCP server)
+
+`bin/neo-x402-mcp.js` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, with no extra
+dependencies. Any MCP client (Claude Code, Claude Desktop, Cursor and others) gets three tools:
+
+| Tool | What it does |
+|---|---|
+| `neo_x402_quote` | Requests a URL without paying and lists the 402 payment options, with the price in token units and whether the server would pay it. |
+| `neo_x402_fetch` | Requests a URL and pays a Neo N3 `exact` option if it is within the limits, then returns status, body and the settlement receipt (tx hash). |
+| `neo_x402_status` | Shows the payer address, the limits and every payment made so far. |
+
+Spending is bounded twice, and both limits are enforced before anything is signed: a **per-request cap** per token
+(`NEO_X402_MAX`) and a **total budget** per token for the server's lifetime (`NEO_X402_BUDGET`, default one request's
+cap). A price above either limit is not signed; the tool returns the 402 terms and the reason instead. A payment counts
+as spent as soon as it is signed. Tokens without a cap are never paid.
+
+```bash
+claude mcp add neo-x402 \
+  -e NEO_X402_KEY_FILE=/path/to/payer.json \
+  -e NEO_X402_MAX="GAS=0.01,fUSDT=0.05" \
+  -e NEO_X402_BUDGET="GAS=0.5,fUSDT=1" \
+  -- node /path/to/neo-x402/bin/neo-x402-mcp.js
+```
+
+The key file is JSON with a `wif` field (or pass `NEO_X402_WIF`). Limits take token symbols from `TOKENS` in decimal
+units, or a script hash with atomic units (`0x...=1000`). `NEO_X402_RPC_MAINNET` / `NEO_X402_RPC_TESTNET` override
+the RPC nodes. Use a dedicated payer key holding only what you are willing to spend.
+
 ## Run a facilitator as a service
 
 ```js
@@ -131,7 +159,7 @@ Resource servers then use `remoteFacilitator('http://host:8402')`.
 
 ## Tests
 
-`npm test` runs 39 tests against a fake Neo node, plus real HTTP sockets for the transport tests.
+`npm test` runs 46 tests against a fake Neo node, plus real HTTP sockets for the transport tests.
 - **Happy paths:** sponsored and direct payments, and a full client → paywall → facilitator round trip.
 - **Tokens** (`test/token.test.js`, fake node with fUSDT and bNEO metadata from MainNet): a sponsored fUSDT payment;
   the asset hash swapped in the signed script (fUSDT → bNEO) and a fUSDT payment relabelled as GAS; payTo and amount
@@ -143,6 +171,9 @@ Resource servers then use `remoteFacilitator('http://host:8402')`.
   widened fee-payer scope, fees over the cap or under the minimum, expired or too-long validity, attributes, a
   signature for another network, a witness from the wrong key, the facilitator as payer, and a pre-filled fee-payer
   witness.
+- **MCP server** (`test/mcp.test.js`): handshake and tool list, in process and over the real stdio binary; a
+  quote that does not pay; a paid fetch with receipt and spend tracking; refusal above the per-request cap and
+  above the remaining budget; limit parsing; non-http URLs.
 - **Edge cases:** insufficient funds, a FAULTed execution, client spending caps, and a replayed `PAYMENT-SIGNATURE`.
 
 `npm run probe -- <rpc> <funded address>` checks things against a live node without spending anything:
@@ -162,7 +193,7 @@ https://n3t5wish.ngd.network (GitHub login and reCAPTCHA, so a person has to do 
 
 ## Status and limits
 
-- Version 0.2. Token payments are tested against a fake node and probed read-only on MainNet; no real token payment
+- Version 0.3. Token payments are tested against a fake node and probed read-only on MainNet; no real token payment
   has been settled yet. The payer must be a standard single-signature account. Multi-sig and contract wallets are not
   supported yet.
 - Sponsor risk: a payer who empties its balance between the facilitator's last simulation and block inclusion makes
